@@ -16,8 +16,9 @@ const state = {
   activeTab: "preview",  // preview | code
   activePage: 0,         // index into project.pages
   generating: false,
-  progress: [],          // live [{stage,detail}] during generation
   editMode: false,       // click-to-edit ("Select") toggle
+  // chat conversation thread: [{ role:"user"|"assistant", text, steps:[...], kind }]
+  messages: [],
   // live streaming buffers, keyed by file -> accumulated html
   live: null,            // { files:{file:html}, current:file, order:[file] } during a stream
   brief: null,           // current editable brief object
@@ -26,6 +27,16 @@ const state = {
   versionsOpen: false,
   booting: true,
 };
+
+// mutable id for the assistant message currently being narrated by the SSE stream
+let liveMsg = null;
+
+// append a message to the thread; returns the message object (so a stream can mutate it live)
+function pushMessage(role, fields = {}) {
+  const m = { role, text: "", steps: [], kind: "", ...fields };
+  state.messages.push(m);
+  return m;
+}
 
 // ---------- helpers ----------
 const el = (tag, attrs = {}, ...kids) => {
@@ -156,7 +167,10 @@ function openSelectPrompt(node, selector, outerHtml) {
     if (!v) return;
     pop.remove();
     state.editMode = false;
-    onEdit(v, { selector, outer_html: outerHtml, file: currentFile() });
+    // Drop the click-to-edit instruction into the chat as a user message, then refine.
+    const label = `${v}  ·  <${tag}>`;
+    pushMessage("user", { text: label });
+    onEdit(v, { selector, outer_html: outerHtml, file: currentFile(), userText: label });
   };
   input.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); if (e.key === "Escape") pop.remove(); });
   document.body.appendChild(pop);
@@ -193,6 +207,7 @@ function render() {
   if (!isMock() && !auth.isAuthed()) { root.appendChild(loginScreen()); return; }
   root.appendChild(topbar());
   root.appendChild(el("div", { class: "split" }, leftPanel(), rightPanel()));
+  scrollThread();
 }
 
 function bootScreen() {
@@ -212,7 +227,7 @@ function loginScreen() {
         "Login with MikeOS")));
 }
 
-// Start a fresh, empty project (clears the current one; render() rebuilds empty inputs).
+// Start a fresh, empty project (clears the current one + the chat thread).
 function newProject() {
   state.project = null;
   state.activePage = 0;
@@ -220,6 +235,7 @@ function newProject() {
   state.brief = null; state.briefOpen = false;
   state.versions = null; state.versionsOpen = false;
   state.editMode = false;
+  state.messages = [];
   render();
   toast("New project — describe what you want on the left.");
 }
@@ -257,51 +273,116 @@ function topbar() {
     !isMock() && el("button", { class: "btn ghost sm", onclick: () => auth.logout() }, "Sign out"));
 }
 
-// ----- left panel -----
+// ----- left panel: the chat conversation -----
 function leftPanel() {
-  const promptEl = el("textarea", { id: "prompt",
-    placeholder: "Describe the website you want…\n\ne.g. A landing page for a specialty coffee roaster in Malmö, warm tones, a menu section and a contact form." });
+  const thread = el("div", { class: "chat-thread", id: "chat-thread" });
 
-  const styleSel = el("select", { id: "style" });
-  if (state.meta) {
-    for (const s of state.meta.styles) styleSel.appendChild(el("option", { value: s.id, title: s.description }, s.name));
+  if (!state.messages.length) {
+    thread.appendChild(chatIntro());
   } else {
-    styleSel.appendChild(el("option", {}, "Loading…"));
-    styleSel.disabled = true;
+    for (const m of state.messages) thread.appendChild(chatBubble(m));
   }
 
-  const genBtn = el("button", { class: "btn primary block", disabled: state.generating || !state.meta,
-    onclick: () => onGenerate(promptEl.value, styleSel.value) },
-    state.generating ? el("span", { class: "spin" }) : null,
-    state.generating ? " Generating…" : "Generate");
+  return el("div", { class: "left chat" }, thread, composer());
+}
 
-  // refine — only shown once a project exists (it's how you change it by prompt)
-  const refineInput = el("input", { type: "text", placeholder: "Tell it what to change…",
+// The friendly empty-state intro: an assistant bubble + clickable example chips.
+function chatIntro() {
+  const chips = el("div", { class: "chat-examples" });
+  for (const ex of EXAMPLE_PROMPTS) {
+    chips.appendChild(el("button", { class: "chat-chip", disabled: state.generating || !state.meta,
+      title: "Build this", onclick: () => sendMessage(ex) }, ex));
+  }
+  return el("div", { class: "msg assistant" },
+    el("div", { class: "avatar" }, "D"),
+    el("div", { class: "bubble" },
+      el("p", {}, "Hi! Describe the site or app you want and I'll build it live — you'll see it appear in the preview. Here are some ideas to get started:"),
+      chips));
+}
+
+// Render one chat message (user right-aligned, assistant left with avatar + live steps).
+function chatBubble(m) {
+  if (m.role === "user") {
+    return el("div", { class: "msg user" }, el("div", { class: "bubble" }, m.text));
+  }
+  const bubble = el("div", { class: "bubble" + (m.kind === "error" ? " error" : "") });
+  // live checklist inside the assistant bubble (progress + page steps)
+  if (m.steps && m.steps.length) bubble.appendChild(stepList(m.steps));
+  if (m.text) bubble.appendChild(el("div", { class: "msg-text", html: mdInline(m.text) }));
+  return el("div", { class: "msg assistant" }, el("div", { class: "avatar" }, "D"), bubble);
+}
+
+// A compact live checklist: prior steps are ✓, the last (while streaming) shows a spinner.
+function stepList(steps) {
+  const list = el("div", { class: "chat-steps" });
+  steps.forEach((s, i) => {
+    const isLast = i === steps.length - 1;
+    const pending = isLast && s.pending !== false;
+    list.appendChild(el("div", { class: "chat-step " + (pending ? "active" : "done") },
+      pending ? el("span", { class: "spin sm" }) : el("span", { class: "chk" }, "✓"),
+      el("span", { class: "cs-label", html: mdInline(s.label) })));
+  });
+  return list;
+}
+
+// A very small inline-markdown renderer (**bold** + `code`) → escaped, safe HTML.
+function mdInline(s) {
+  let out = esc(s == null ? "" : s);
+  out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  out = out.replace(/`([^`]+)`/g, "<code>$1</code>");
+  return out;
+}
+
+// The composer pinned at the bottom of the left: style control + textarea + Send.
+function composer() {
+  const styleSel = el("select", { id: "style", class: "chat-style", title: "Design style",
+    disabled: state.generating || !state.meta || !!state.project });
+  if (state.meta) {
+    for (const s of state.meta.styles) styleSel.appendChild(el("option", { value: s.id, title: s.description }, s.name));
+    if (state.project && state.project.style) styleSel.value = state.project.style;
+  } else {
+    styleSel.appendChild(el("option", {}, "Loading…"));
+  }
+  // once a project exists the style is changed via Restyle in the preview toolbar, not create
+  if (state.project) styleSel.title = "Use Restyle in the preview toolbar to change the look";
+
+  const ta = el("textarea", { id: "prompt", class: "chat-input", rows: 1,
+    placeholder: state.project ? "Tell me what to change…" : "Describe the site or app you want…",
     disabled: state.generating });
-  const refineBtn = el("button", { class: "btn", disabled: state.generating,
-    onclick: () => { const v = refineInput.value.trim(); if (v) { refineInput.value = ""; onEdit(v, {}); } } });
-  refineBtn.textContent = "Send";
-  refineInput.addEventListener("keydown", (e) => { if (e.key === "Enter") refineBtn.click(); });
 
-  return el("div", { class: "left" },
-    el("div", { class: "scroll" },
-      el("div", { class: "field" },
-        el("label", {}, "What do you want to build?"),
-        promptEl),
-      el("div", { class: "field" },
-        el("label", {}, "Design style"),
-        styleSel),
-      genBtn,
-      state.project ? el("div", { class: "divider" }) : null,
-      state.project ? el("div", { class: "section-title" }, "Change it") : null,
-      state.project ? el("div", { class: "refine-hint" }, "Type a change, or use the Select tool in the preview to click an element.") : null,
-      state.project ? el("div", { class: "refine" }, refineInput, refineBtn) : null,
-      state.project ? restyleControl() : null,
-      state.project ? briefPanel() : null,
-      el("div", { class: "divider" }),
-      el("div", { class: "section-title" }, "My projects",
-        el("span", { class: "count" }, state.projects.length ? `(${state.projects.length})` : "")),
-      projectsList()));
+  const send = () => {
+    const v = ta.value.trim();
+    if (!v) return;
+    ta.value = ""; autoGrow(ta);
+    sendMessage(v, styleSel.value);
+  };
+  const sendBtn = el("button", { class: "btn primary chat-send", title: "Send",
+    disabled: state.generating || !state.meta,
+    onclick: send },
+    state.generating ? el("span", { class: "spin" }) : el("span", { html: "&#8593;" }));
+
+  ta.addEventListener("input", () => autoGrow(ta));
+  ta.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+
+  return el("div", { class: "composer" },
+    el("div", { class: "composer-tools" },
+      el("label", { class: "style-lbl" }, "Style"),
+      styleSel),
+    el("div", { class: "composer-row" }, ta, sendBtn));
+}
+
+// Grow the composer textarea with its content, up to a cap.
+function autoGrow(ta) {
+  ta.style.height = "auto";
+  ta.style.height = Math.min(ta.scrollHeight, 160) + "px";
+}
+
+// Keep the thread scrolled to the newest message.
+function scrollThread() {
+  const t = document.getElementById("chat-thread");
+  if (t) t.scrollTop = t.scrollHeight;
 }
 
 // Phase 4: a small style dropdown that re-renders the SAME content in a new style.
@@ -350,64 +431,6 @@ async function toggleVersions() {
   render();
 }
 
-// Phase 4: editable Brief panel ("how I understood it").
-function briefPanel() {
-  const b = state.brief;
-  const head = el("button", { class: "brief-head", onclick: () => { state.briefOpen = !state.briefOpen; render(); } },
-    el("span", {}, (state.briefOpen ? "▾ " : "▸ ") + "Brief"),
-    el("span", { class: "brief-sub" }, "how I understood it"));
-  const wrap = el("div", { class: "brief" }, head);
-  if (!state.briefOpen) return wrap;
-  if (!b) { wrap.appendChild(el("div", { class: "empty" }, "No brief yet — generate or open a project.")); return wrap; }
-
-  const brand = el("input", { type: "text", value: b.brand || "", disabled: state.generating });
-  const tagline = el("input", { type: "text", value: b.tagline || "", disabled: state.generating });
-  const tone = el("input", { type: "text", value: b.tone || "", disabled: state.generating });
-  const sections = el("textarea", { class: "brief-sections", disabled: state.generating },
-    (Array.isArray(b.sections) ? b.sections.join("\n") : (b.sections || "")));
-
-  const rebuild = el("button", { class: "btn sm", disabled: state.generating, onclick: () => {
-    const next = {
-      brand: brand.value.trim(),
-      tagline: tagline.value.trim(),
-      tone: tone.value.trim(),
-      sections: sections.value.split("\n").map((s) => s.trim()).filter(Boolean),
-    };
-    onRebuildBrief(next);
-  } }, "Rebuild from brief");
-
-  wrap.appendChild(el("div", { class: "brief-body" },
-    briefField("Brand", brand),
-    briefField("Tagline", tagline),
-    briefField("Tone", tone),
-    briefField("Section outline (one per line)", sections),
-    el("div", { class: "brief-actions" }, rebuild)));
-  return wrap;
-}
-function briefField(label, input) {
-  return el("div", { class: "field" }, el("label", {}, label), input);
-}
-
-function projectsList() {
-  if (!state.projects.length) return el("div", { class: "empty" }, "No projects yet. Generate your first site above.");
-  const list = el("div", { class: "projects cards" });
-  for (const p of state.projects) {
-    const active = state.project && state.project.id === p.id;
-    const thumb = p.thumbnail
-      ? el("img", { class: "thumb", src: p.thumbnail, alt: "", loading: "lazy" })
-      : el("div", { class: "thumb thumb-ph" }, "✦");
-    list.appendChild(el("div", { class: "proj card" + (active ? " active" : ""),
-      onclick: () => openProject(p.id) },
-      thumb,
-      el("div", { class: "meta" },
-        el("div", { class: "name" }, p.title || "Untitled"),
-        el("div", { class: "sub" }, `${p.page_type || "page"} · ${p.style || ""} · ${fmtDate(p.updated_at)}`)),
-      el("button", { class: "del", title: "Delete",
-        onclick: (e) => { e.stopPropagation(); onDelete(p.id); } }, "×")));
-  }
-  return list;
-}
-
 // ----- right panel -----
 function rightPanel() {
   const selectBtn = (state.project && !state.generating)
@@ -421,6 +444,7 @@ function rightPanel() {
       tabBtn("Preview", "preview"),
       tabBtn("Code", "code")),
     selectBtn,
+    (state.project && !state.generating) ? restyleControl() : null,
     el("div", { class: "spacer" }),
     state.project ? urlPill() : null,
     state.project ? versionHistory() : null,
@@ -429,7 +453,7 @@ function rightPanel() {
 
   const body = el("div", { class: "right-body" });
   if (state.generating) {
-    // Phase 1: live preview building up, with the stage list beside it.
+    // Live preview building up in the middle (the narration now lives in the chat).
     body.appendChild(liveView());
   } else if (!state.project) {
     body.appendChild(placeholder());
@@ -482,62 +506,22 @@ const EXAMPLE_PROMPTS = [
   "An inbox screen for a support ticketing tool — a message list with a reading pane and status labels",
 ];
 
-// Fill the prompt on the left with an example and generate it (one-click test).
-function useExample(text) {
-  const p = document.getElementById("prompt");
-  if (p) p.value = text;
-  const styleEl = document.getElementById("style");
-  const style = (styleEl && styleEl.value) ||
-    (state.meta && state.meta.styles[0] && state.meta.styles[0].id) || "modern";
-  onGenerate(text, style);
-}
-
 function placeholder() {
-  const examples = el("div", { class: "examples" });
-  for (const ex of EXAMPLE_PROMPTS) {
-    examples.appendChild(el("button", { class: "example", title: "Generate this",
-      onclick: () => useExample(ex) }, ex));
-  }
   return el("div", { class: "placeholder" },
     el("div", { class: "inner" },
       el("div", { class: "big" }, "✦"),
       el("h2", {}, "Your design will appear here"),
-      el("p", {}, "Describe what you want on the left and hit Generate — or try one of these:"),
-      examples,
-      el("p", { class: "examples-hint" }, "Tip: the page type is detected automatically; pick a Design style on the left to change the look.")));
+      el("p", {}, "Describe the site or app you want in the chat on the left — you'll watch it build here, live.")));
 }
 
-// ---------- Phase 1: live streaming view (preview builds up + stage list) ----------
+// ---------- live streaming view (middle): the preview builds up from tokens ----------
+// The build narration lives in the chat now; the middle is purely the streaming preview.
 function liveView() {
   const box = el("div", { class: "live-view", id: "live-view" });
-  // stage list (compact, top)
-  const steps = el("div", { class: "live-steps" });
-  const title = el("div", { class: "gen-title" },
-    el("span", { class: "spin" }),
-    el("span", {}, state.live && state.live.current
-      ? `Building ${state.live.current}…`
-      : (state.project ? "Refining your design…" : "Building your design…")));
-  steps.appendChild(title);
-  const list = el("div", { class: "gen-steps" });
-  const stps = state.progress;
-  if (!stps.length) {
-    list.appendChild(el("div", { class: "gen-step active" },
-      el("span", { class: "gs-dot" }), el("span", { class: "gs-label" }, "Starting…")));
-  } else {
-    stps.forEach((s, i) => {
-      const isLast = i === stps.length - 1;
-      list.appendChild(el("div", { class: "gen-step " + (isLast ? "active" : "done") },
-        el("span", { class: "gs-dot" }, isLast ? "" : "✓"),
-        el("span", { class: "gs-label" }, s.stage + (s.detail ? "  ·  " + s.detail : ""))));
-    });
-  }
-  steps.appendChild(list);
-  box.appendChild(steps);
-
-  // live preview iframe — updated via srcdoc as tokens arrive
   const frame = el("iframe", { class: "preview-frame live-frame", id: "live-frame", title: "Live preview",
     sandbox: "allow-scripts allow-forms allow-popups allow-same-origin" });
-  frame.srcdoc = (state.live && state.live.current && state.live.files[state.live.current]) || "<!doctype html><body style='font-family:system-ui;color:#888;display:grid;place-items:center;height:100vh'>Waiting for the first lines…</body>";
+  frame.srcdoc = (state.live && state.live.current && state.live.files[state.live.current]) ||
+    "<!doctype html><body style='font-family:system-ui;color:#888;display:grid;place-items:center;height:100vh'>Building your design…</body>";
   box.appendChild(el("div", { class: "live-preview" }, frame));
   return box;
 }
@@ -553,11 +537,7 @@ function updateLiveFrame(force) {
     const html = state.live.files[state.live.current] || "";
     if (html) frame.srcdoc = html;
   }
-  // also refresh the title/steps
-  const lv = document.getElementById("live-view");
-  if (lv) lv.replaceWith(liveView());
 }
-function renderProgress() { updateLiveFrame(false); }
 
 // ---------- actions ----------
 async function loadMeta() {
@@ -568,19 +548,60 @@ async function loadProjects() {
   await guard(async () => { state.projects = (await api.listProjects()) || []; });
 }
 
-// Shared SSE event handler: fills the live buffers + stage list as frames arrive.
+// Repaint just the live assistant bubble in place (cheap; avoids a full render()).
+function refreshLiveMsg() {
+  if (!liveMsg) return;
+  const idx = state.messages.indexOf(liveMsg);
+  const thread = document.getElementById("chat-thread");
+  if (idx < 0 || !thread) return;
+  const node = thread.children[idx];
+  if (node) { node.replaceWith(chatBubble(liveMsg)); scrollThread(); }
+}
+
+// Mark all steps done, then add a new active (pending) step to the live bubble.
+function addStep(label) {
+  if (!liveMsg) return;
+  for (const s of liveMsg.steps) s.pending = false;
+  liveMsg.steps.push({ label, pending: true });
+  refreshLiveMsg();
+}
+// Update the label of the current (last) step without adding a new one.
+function setStep(label) {
+  if (!liveMsg || !liveMsg.steps.length) { addStep(label); return; }
+  liveMsg.steps[liveMsg.steps.length - 1].label = label;
+  refreshLiveMsg();
+}
+
+// A short, friendly one-line summary of the brief for the chat.
+function briefLine(b) {
+  const name = (b && (b.brand || (b.brand && b.brand.name))) || (state.project && state.project.title) || "your site";
+  const tagline = (b && b.tagline) ? " — " + b.tagline : "";
+  let line = `Here's the plan — **${name}**${tagline}.`;
+  const secs = b && Array.isArray(b.sections) ? b.sections.length : 0;
+  if (secs) line += ` ${secs} section${secs === 1 ? "" : "s"}.`;
+  if (b && b.data_model) line += ` With a local database${b.storage ? " (" + b.storage + ")" : ""}.`;
+  return line;
+}
+
+// Shared SSE event handler: narrates into the live assistant bubble AND streams the
+// tokens into the middle preview. `liveMsg` is the assistant message being written.
 function makeStreamHandler() {
   state.live = { files: {}, current: null, order: [] };
   return (evt) => {
     switch (evt.type) {
-      case "progress":
-        state.progress.push(evt); updateLiveFrame(true); break;
+      case "progress": {
+        const label = evt.stage + (evt.detail ? " · `" + evt.detail + "`" : "");
+        addStep(label); updateLiveFrame(true); break;
+      }
       case "brief":
-        state.brief = evt.brief; break;
+        state.brief = evt.brief;
+        addStep(briefLine(evt.brief));
+        break;
       case "page_start":
         state.live.current = evt.file;
         if (!state.live.order.includes(evt.file)) state.live.order.push(evt.file);
         if (state.live.files[evt.file] == null) state.live.files[evt.file] = "";
+        addStep("Building `" + evt.file + "`…");
         updateLiveFrame(true); break;
       case "token":
         if (state.live.files[evt.file] == null) state.live.files[evt.file] = "";
@@ -588,36 +609,71 @@ function makeStreamHandler() {
         state.live.current = evt.file;
         updateLiveFrame(false); break;
       case "page_done":
+        setStep("`" + evt.file + "`");
         updateLiveFrame(true); break;
       case "error":
-        break; // surfaced by the promise rejection
+        break; // surfaced by the promise rejection → finalized as an error bubble
     }
   };
 }
 
+// The one entry point for the composer (and example chips). First message with no
+// project → create; every message after → refine. Both narrate live in the chat.
+function sendMessage(text, style) {
+  text = (text || "").trim();
+  if (!text || state.generating) return;
+  pushMessage("user", { text });
+  if (state.project) onEdit(text, {});
+  else onGenerate(text, style || currentStyle());
+}
+function currentStyle() {
+  const styleEl = document.getElementById("style");
+  return (styleEl && styleEl.value) ||
+    (state.meta && state.meta.styles[0] && state.meta.styles[0].id) || "modern";
+}
+
+// Finalize the live assistant bubble (collapse spinner) with a summary line.
+function finalizeLiveMsg(text, kind) {
+  if (!liveMsg) return;
+  for (const s of liveMsg.steps) s.pending = false;
+  if (text) liveMsg.text = text;
+  if (kind) liveMsg.kind = kind;
+  liveMsg = null;
+}
+
 async function onGenerate(prompt, style, title) {
   prompt = (prompt || "").trim();
-  if (!prompt) { toast("Describe what you want first.", "err"); return; }
-  state.generating = true; state.progress = []; state.editMode = false;
-  state.brief = null; render();
+  if (!prompt) return;
+  state.generating = true; state.editMode = false; state.brief = null;
+  liveMsg = pushMessage("assistant", { steps: [{ label: "Understanding your request", pending: true }] });
+  render();
   await guard(async () => {
-    // page_type "auto" -> the GPU infers it; stream events into the live preview
+    // page_type "auto" -> the GPU infers it; stream events into the live preview + chat
     const payload = { prompt, page_type: "auto", style, title: title || undefined };
     const onEvent = makeStreamHandler();
     const proj = api.createProjectStream
       ? await api.createProjectStream(payload, onEvent)
       : await api.createProject(payload);
     applyProject(proj);
+    const n = proj.pages ? proj.pages.length : 1;
+    const js = proj.pages && proj.pages.some((p) => /<script/i.test(p.html || "")) ? ", interactive" : "";
+    finalizeLiveMsg(`✓ Built **${proj.title || "your site"}** — ${n} page${n === 1 ? "" : "s"}${js}. Tell me what to change.`);
     await loadProjects();
     toast(proj.page_type ? `Built a ${proj.page_type}.` : "Site generated.", "ok");
-  });
-  state.generating = false; state.progress = []; state.live = null; render();
+  }).catch((e) => { finalizeLiveMsg("Sorry — I couldn't build that. " + (e && e.message ? e.message : "Please try again."), "error"); });
+  state.generating = false; state.live = null; liveMsg = null; render();
 }
 
-// Phase 2: fast targeted refine / click-to-edit — both go through /edit (SSE).
-async function onEdit(instruction, { selector, outer_html, file } = {}) {
+// Fast targeted refine / click-to-edit — both go through /edit (SSE), narrated in chat.
+// If `userText` is omitted (e.g. click-to-edit), we append the instruction as a user bubble.
+async function onEdit(instruction, { selector, outer_html, file, userText } = {}) {
   if (!state.project) return;
-  state.generating = true; state.progress = []; render();
+  if (userText === undefined && !state.messages.some((m) => m.role === "user" && m.text === instruction)) {
+    pushMessage("user", { text: instruction });
+  }
+  state.generating = true;
+  liveMsg = pushMessage("assistant", { steps: [{ label: "Applying your change", pending: true }] });
+  render();
   await guard(async () => {
     const body = { instruction };
     if (file) body.file = file;
@@ -628,39 +684,47 @@ async function onEdit(instruction, { selector, outer_html, file } = {}) {
       ? await api.editStream(state.project.id, body, onEvent)
       : await api.refine(state.project.id, instruction);
     applyProject(proj);
+    finalizeLiveMsg("✓ Done. Anything else to change?");
     await loadProjects();
     if (state.versionsOpen) state.versions = await api.versions(proj.id).catch(() => state.versions);
     toast("Applied your change.", "ok");
-  });
-  state.generating = false; state.progress = []; state.live = null; render();
+  }).catch((e) => { finalizeLiveMsg("Sorry — that change didn't apply. " + (e && e.message ? e.message : ""), "error"); });
+  state.generating = false; state.live = null; liveMsg = null; render();
 }
 
-// Phase 4: rebuild from an edited brief (SSE).
+// Phase 4: rebuild from an edited brief (SSE), narrated in chat.
 async function onRebuildBrief(brief) {
   if (!state.project) return;
-  state.generating = true; state.progress = []; render();
+  state.generating = true;
+  liveMsg = pushMessage("assistant", { steps: [{ label: "Rebuilding from the brief", pending: true }] });
+  render();
   await guard(async () => {
     const onEvent = makeStreamHandler();
     const proj = await api.putBriefStream(state.project.id, brief, onEvent);
     applyProject(proj);
+    finalizeLiveMsg("✓ Rebuilt from the updated brief.");
     await loadProjects();
     toast("Rebuilt from your brief.", "ok");
-  });
-  state.generating = false; state.progress = []; state.live = null; render();
+  }).catch((e) => { finalizeLiveMsg("Sorry — the rebuild failed. " + (e && e.message ? e.message : ""), "error"); });
+  state.generating = false; state.live = null; liveMsg = null; render();
 }
 
-// Phase 4: restyle — same content, new look (SSE).
+// Phase 4: restyle — same content, new look (SSE), narrated in chat.
 async function onRestyle(style) {
   if (!state.project) return;
-  state.generating = true; state.progress = []; render();
+  state.generating = true;
+  pushMessage("user", { text: "Restyle → " + style });
+  liveMsg = pushMessage("assistant", { steps: [{ label: "Re-rendering in the new style", pending: true }] });
+  render();
   await guard(async () => {
     const onEvent = makeStreamHandler();
     const proj = await api.restyleStream(state.project.id, style, onEvent);
     applyProject(proj);
+    finalizeLiveMsg(`✓ Restyled to **${style}**.`);
     await loadProjects();
     toast("Restyled to " + style + ".", "ok");
-  });
-  state.generating = false; state.progress = []; state.live = null; render();
+  }).catch((e) => { finalizeLiveMsg("Sorry — restyle failed. " + (e && e.message ? e.message : ""), "error"); });
+  state.generating = false; state.live = null; liveMsg = null; render();
 }
 
 // Phase 5: revert to a prior version.
@@ -695,9 +759,13 @@ async function openProject(id) {
     if (!state.brief && api.getBrief) {
       try { const r = await api.getBrief(id); state.brief = (r && r.brief) || null; } catch {}
     }
+    // Seed a fresh thread so the user can keep chatting to refine this project.
+    state.messages = [pushSeed(`Opened **${proj.title || "your project"}**. What should I change?`)];
     render();
   });
 }
+// A standalone assistant message (not pushed to state until assigned).
+function pushSeed(text) { return { role: "assistant", text, steps: [], kind: "" }; }
 
 async function onDelete(id) {
   if (!confirm("Delete this project? This cannot be undone.")) return;
