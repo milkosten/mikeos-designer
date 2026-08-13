@@ -147,7 +147,7 @@ function topbar() {
     el("div", { class: "brand" },
       el("div", { class: "logo" }, "D"),
       el("span", {}, "MikeOS Designer"),
-      el("small", {}, isMock() ? "· mock mode" : "· designer.osmike.com")),
+      isMock() && el("small", {}, "· mock mode")),
     projectSwitcher(),
     el("div", { class: "spacer" }),
     el("div", { class: "who" },
@@ -160,7 +160,6 @@ function topbar() {
 function leftPanel() {
   const promptEl = el("textarea", { id: "prompt",
     placeholder: "Describe the website you want…\n\ne.g. A landing page for a specialty coffee roaster in Malmö, warm tones, a menu section and a contact form." });
-  const titleEl = el("input", { type: "text", id: "title", placeholder: "Project title (optional)" });
 
   const styleSel = el("select", { id: "style" });
   if (state.meta) {
@@ -171,15 +170,14 @@ function leftPanel() {
   }
 
   const genBtn = el("button", { class: "btn primary block", disabled: state.generating || !state.meta,
-    onclick: () => onGenerate(promptEl.value, styleSel.value, titleEl.value) },
+    onclick: () => onGenerate(promptEl.value, styleSel.value) },
     state.generating ? el("span", { class: "spin" }) : null,
     state.generating ? " Generating…" : "Generate");
 
-  // refine
-  const refineInput = el("input", { type: "text",
-    placeholder: state.project ? "Tell it what to change…" : "Generate a project first",
-    disabled: !state.project || state.generating });
-  const refineBtn = el("button", { class: "btn", disabled: !state.project || state.generating,
+  // refine — only shown once a project exists (it's how you change it by prompt)
+  const refineInput = el("input", { type: "text", placeholder: "Tell it what to change…",
+    disabled: state.generating });
+  const refineBtn = el("button", { class: "btn", disabled: state.generating,
     onclick: () => { const v = refineInput.value.trim(); if (v) { refineInput.value = ""; onRefine(v); } } });
   refineBtn.textContent = "Send";
   refineInput.addEventListener("keydown", (e) => { if (e.key === "Enter") refineBtn.click(); });
@@ -190,13 +188,12 @@ function leftPanel() {
         el("label", {}, "What do you want to build?"),
         promptEl),
       el("div", { class: "field" },
-        el("label", {}, "Design style", el("span", { class: "hint" }, " · the page type is detected automatically")),
+        el("label", {}, "Design style"),
         styleSel),
-      el("div", { class: "field" }, el("label", {}, "Title"), titleEl),
       genBtn,
-      el("div", { class: "divider" }),
-      el("div", { class: "section-title" }, "Refine"),
-      el("div", { class: "refine" }, refineInput, refineBtn),
+      state.project ? el("div", { class: "divider" }) : null,
+      state.project ? el("div", { class: "section-title" }, "Change it") : null,
+      state.project ? el("div", { class: "refine" }, refineInput, refineBtn) : null,
       el("div", { class: "divider" }),
       el("div", { class: "section-title" }, "My projects",
         el("span", { class: "count" }, state.projects.length ? `(${state.projects.length})` : "")),
