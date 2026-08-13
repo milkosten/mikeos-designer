@@ -162,18 +162,15 @@ function leftPanel() {
   const titleEl = el("input", { type: "text", id: "title", placeholder: "Project title (optional)" });
 
   const styleSel = el("select", { id: "style" });
-  const typeSel = el("select", { id: "ptype" });
   if (state.meta) {
-    for (const p of state.meta.page_types) typeSel.appendChild(el("option", { value: p.id, title: p.description }, p.name));
     for (const s of state.meta.styles) styleSel.appendChild(el("option", { value: s.id, title: s.description }, s.name));
   } else {
-    typeSel.appendChild(el("option", {}, "Loading…"));
     styleSel.appendChild(el("option", {}, "Loading…"));
-    typeSel.disabled = styleSel.disabled = true;
+    styleSel.disabled = true;
   }
 
   const genBtn = el("button", { class: "btn primary block", disabled: state.generating || !state.meta,
-    onclick: () => onGenerate(promptEl.value, typeSel.value, styleSel.value, titleEl.value) },
+    onclick: () => onGenerate(promptEl.value, styleSel.value, titleEl.value) },
     state.generating ? el("span", { class: "spin" }) : null,
     state.generating ? " Generating…" : "Generate");
 
@@ -191,9 +188,9 @@ function leftPanel() {
       el("div", { class: "field" },
         el("label", {}, "What do you want to build?"),
         promptEl),
-      el("div", { class: "row2" },
-        el("div", { class: "field" }, el("label", {}, "Page type"), typeSel),
-        el("div", { class: "field" }, el("label", {}, "Style"), styleSel)),
+      el("div", { class: "field" },
+        el("label", {}, "Design style", el("span", { class: "hint" }, " · the page type is detected automatically")),
+        styleSel),
       el("div", { class: "field" }, el("label", {}, "Title"), titleEl),
       genBtn,
       el("div", { class: "divider" }),
@@ -301,15 +298,16 @@ async function loadProjects() {
   await guard(async () => { state.projects = (await api.listProjects()) || []; });
 }
 
-async function onGenerate(prompt, page_type, style, title) {
+async function onGenerate(prompt, style, title) {
   prompt = (prompt || "").trim();
   if (!prompt) { toast("Describe what you want first.", "err"); return; }
   state.generating = true; render();
   await guard(async () => {
-    const proj = await api.createProject({ prompt, page_type, style, title: title || undefined });
+    // page_type "auto" -> the GPU infers it from the prompt
+    const proj = await api.createProject({ prompt, page_type: "auto", style, title: title || undefined });
     state.project = proj; state.activePage = 0; state.activeTab = "preview";
     await loadProjects();
-    toast("Site generated.", "ok");
+    toast(proj.page_type ? `Built a ${proj.page_type}.` : "Site generated.", "ok");
   });
   state.generating = false; render();
 }
