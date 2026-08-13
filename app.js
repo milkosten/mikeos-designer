@@ -113,6 +113,33 @@ function loginScreen() {
         "Login with MikeOS")));
 }
 
+// Start a fresh, empty project (clears the current one; render() rebuilds empty inputs).
+function newProject() {
+  state.project = null;
+  state.activePage = 0;
+  state.activeTab = "preview";
+  render();
+  toast("New project — describe what you want on the left.");
+}
+
+// Dropdown of previous designs + a "New project" button.
+function projectSwitcher() {
+  const sel = el("select", { class: "proj-select", title: "Open one of your previous designs",
+    onchange: (e) => { const id = e.target.value; if (id) openProject(id); } });
+  sel.appendChild(el("option", { value: "" },
+    state.projects.length ? `Previous designs (${state.projects.length})` : "No saved designs yet"));
+  for (const p of state.projects) {
+    const when = p.updated_at ? "  ·  " + fmtDate(p.updated_at) : "";
+    const opt = el("option", { value: p.id }, (p.title || p.id) + when);
+    if (state.project && state.project.id === p.id) opt.selected = true;
+    sel.appendChild(opt);
+  }
+  return el("div", { class: "proj-switcher" },
+    sel,
+    el("button", { class: "btn sm", title: "Start a new empty project",
+      onclick: () => newProject() }, "＋ New project"));
+}
+
 function topbar() {
   const u = isMock() ? { name: "Demo user (mock)" } : auth.user();
   return el("div", { class: "topbar" },
@@ -120,6 +147,7 @@ function topbar() {
       el("div", { class: "logo" }, "D"),
       el("span", {}, "MikeOS Designer"),
       el("small", {}, isMock() ? "· mock mode" : "· designer.osmike.com")),
+    projectSwitcher(),
     el("div", { class: "spacer" }),
     el("div", { class: "who" },
       el("span", { class: "dot" }),

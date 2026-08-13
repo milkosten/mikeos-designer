@@ -256,3 +256,15 @@ select { appearance: none; cursor: pointer;
   .left { border-right: none; border-bottom: 1px solid var(--border); max-height: 46vh; }
   .url-pill { max-width: 140px; }
 }
+
+/* ---------- project switcher (topbar) ---------- */
+.proj-switcher { display: flex; align-items: center; gap: 8px; margin-left: 18px; }
+.proj-select {
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 7px 10px; font: inherit; font-size: 13px;
+  max-width: 260px; cursor: pointer;
+}
+.proj-select:hover { border-color: var(--border-2); }
+.proj-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+@media (max-width: 720px) { .proj-select { max-width: 150px; } .proj-switcher { margin-left: 8px; } }
