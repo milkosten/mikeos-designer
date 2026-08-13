@@ -275,12 +275,38 @@ function codeView() {
   return el("div", { class: "code-wrap" }, pre);
 }
 
+const EXAMPLE_PROMPTS = [
+  "A CI/CD pipeline dashboard for a self-hosted DevOps tool — success rate, build durations, and a recent-builds table",
+  "The account settings screen for a team chat app — profile, notifications, and billing sections",
+  "A signup / onboarding screen for a habit-tracking app, with a short value pitch beside the form",
+  "A pricing page for a SaaS uptime monitor — three tiers and a feature comparison table",
+  "A distraction-free writing app: a document editor with a sidebar of documents",
+  "An inbox screen for a support ticketing tool — a message list with a reading pane and status labels",
+];
+
+// Fill the prompt on the left with an example and generate it (one-click test).
+function useExample(text) {
+  const p = document.getElementById("prompt");
+  if (p) p.value = text;
+  const styleEl = document.getElementById("style");
+  const style = (styleEl && styleEl.value) ||
+    (state.meta && state.meta.styles[0] && state.meta.styles[0].id) || "modern";
+  onGenerate(text, style);
+}
+
 function placeholder() {
+  const examples = el("div", { class: "examples" });
+  for (const ex of EXAMPLE_PROMPTS) {
+    examples.appendChild(el("button", { class: "example", title: "Generate this",
+      onclick: () => useExample(ex) }, ex));
+  }
   return el("div", { class: "placeholder" },
     el("div", { class: "inner" },
       el("div", { class: "big" }, "✦"),
-      el("h2", {}, "Your site will appear here"),
-      el("p", {}, "Write a prompt on the left and hit Generate. You'll get a live preview and the full HTML, ready to refine, publish, or download.")));
+      el("h2", {}, "Your design will appear here"),
+      el("p", {}, "Describe what you want on the left and hit Generate — or try one of these:"),
+      examples,
+      el("p", { class: "examples-hint" }, "Tip: the page type is detected automatically; pick a Design style on the left to change the look.")));
 }
 
 function genOverlay() {
