@@ -561,8 +561,15 @@ function refreshLiveMsg() {
 // Mark all steps done, then add a new active (pending) step to the live bubble.
 function addStep(label) {
   if (!liveMsg) return;
-  for (const s of liveMsg.steps) s.pending = false;
-  liveMsg.steps.push({ label, pending: true });
+  const steps = liveMsg.steps;
+  for (const s of steps) s.pending = false;
+  // Don't add a duplicate of the step we're already on (e.g. the seeded first step
+  // matching the backend's first `progress` event).
+  if (steps.length && steps[steps.length - 1].label === label) {
+    steps[steps.length - 1].pending = true;
+  } else {
+    steps.push({ label, pending: true });
+  }
   refreshLiveMsg();
 }
 // Update the label of the current (last) step without adding a new one.
@@ -574,12 +581,22 @@ function setStep(label) {
 
 // A short, friendly one-line summary of the brief for the chat.
 function briefLine(b) {
-  const name = (b && (b.brand || (b.brand && b.brand.name))) || (state.project && state.project.title) || "your site";
-  const tagline = (b && b.tagline) ? " — " + b.tagline : "";
-  let line = `Here's the plan — **${name}**${tagline}.`;
-  const secs = b && Array.isArray(b.sections) ? b.sections.length : 0;
-  if (secs) line += ` ${secs} section${secs === 1 ? "" : "s"}.`;
-  if (b && b.data_model) line += ` With a local database${b.storage ? " (" + b.storage + ")" : ""}.`;
+  b = b || {};
+  // brand may be an object {name,tagline,tone} (backend) or a plain string (mock)
+  const brand = b.brand;
+  const name = (brand && typeof brand === "object" ? brand.name : brand)
+    || (state.project && state.project.title) || "your site";
+  const tagline = (brand && typeof brand === "object" ? brand.tagline : b.tagline) || "";
+  let line = `Here's the plan — **${esc(name)}**` + (tagline ? ` — ${esc(tagline)}` : "") + ".";
+  const files = Array.isArray(b.pages) ? b.pages.map((p) => p && p.file).filter(Boolean)
+    : (Array.isArray(b.files) ? b.files : []);
+  if (files.length > 1) line += ` ${files.length} pages: ${files.join(", ")}.`;
+  else if (files.length === 1) line += " One page.";
+  const dm = b.data_model;
+  if (dm) {
+    const storage = (dm && typeof dm === "object" && dm.storage) ? dm.storage : "localStorage";
+    line += ` With a local database (${storage}).`;
+  }
   return line;
 }
 
