@@ -136,6 +136,20 @@ export const mockApi = {
     return { url: p.url, visibility: "public" };
   },
   async deleteProject(id) { await wait(200); store.delete(id); return { deleted: true }; },
+  async createProjectStream(payload, onProgress) {
+    const steps = [
+      ["Understanding your request", ""],
+      ["Detected page type", "App Dashboard"],
+      ["Planning the layout and content", ""],
+      ["Planned", payload.title || "Acme Analytics"],
+      ["Designing the page", "index.html"],
+      ["Checking the design", "index.html"],
+      ["Polishing the design", "index.html"],
+      ["Publishing", ""],
+    ];
+    for (const [stage, detail] of steps) { if (onProgress) onProgress({ stage, detail }); await wait(650); }
+    return this.createProject(payload);
+  },
 
   // mock-only helper the app uses to render previews without a live host
   _htmlFor(id, file) {

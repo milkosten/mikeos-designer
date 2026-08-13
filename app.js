@@ -16,6 +16,7 @@ const state = {
   activeTab: "preview",  // preview | code
   activePage: 0,         // index into project.pages
   generating: false,
+  progress: [],          // live [{stage,detail}] during generation
   booting: true,
 };
 
@@ -230,13 +231,13 @@ function rightPanel() {
     state.project ? el("button", { class: "btn sm", onclick: onDownload }, "Download") : null);
 
   const body = el("div", { class: "right-body" });
-  if (!state.project) {
+  if (state.generating) {
+    body.appendChild(progressView());               // live stage-by-stage progress
+  } else if (!state.project) {
     body.appendChild(placeholder());
   } else {
-    if (state.project.pages.length > 1) body.parentNode; // (subtabs handled below in wrapper)
     if (state.activeTab === "preview") body.appendChild(previewIframe(state.project, state.activePage));
     else body.appendChild(codeView());
-    if (state.generating) body.appendChild(genOverlay());
   }
 
   // multi-page sub-tab bar sits between head and body
@@ -289,6 +290,33 @@ function genOverlay() {
       el("div", {}, state.project ? "Refining your site…" : "Building your site…")));
 }
 
+// Live stage-by-stage progress shown in the middle panel during generation.
+function progressView() {
+  const box = el("div", { class: "gen-progress", id: "gen-progress" });
+  box.appendChild(el("div", { class: "gen-title" },
+    el("span", { class: "spin" }),
+    el("span", {}, state.project ? "Refining your design…" : "Building your design…")));
+  const list = el("div", { class: "gen-steps" });
+  const steps = state.progress;
+  if (!steps.length) {
+    list.appendChild(el("div", { class: "gen-step active" },
+      el("span", { class: "gs-dot" }), el("span", { class: "gs-label" }, "Starting…")));
+  } else {
+    steps.forEach((s, i) => {
+      const isLast = i === steps.length - 1;
+      list.appendChild(el("div", { class: "gen-step " + (isLast ? "active" : "done") },
+        el("span", { class: "gs-dot" }, isLast ? "" : "✓"),
+        el("span", { class: "gs-label" }, s.stage + (s.detail ? "  ·  " + s.detail : ""))));
+    });
+  }
+  box.appendChild(list);
+  return box;
+}
+function renderProgress() {
+  const old = document.getElementById("gen-progress");
+  if (old) old.replaceWith(progressView());
+}
+
 // ---------- actions ----------
 async function loadMeta() {
   try { state.meta = await api.meta(); }
@@ -301,15 +329,19 @@ async function loadProjects() {
 async function onGenerate(prompt, style, title) {
   prompt = (prompt || "").trim();
   if (!prompt) { toast("Describe what you want first.", "err"); return; }
-  state.generating = true; render();
+  state.generating = true; state.progress = []; render();
   await guard(async () => {
-    // page_type "auto" -> the GPU infers it from the prompt
-    const proj = await api.createProject({ prompt, page_type: "auto", style, title: title || undefined });
+    // page_type "auto" -> the GPU infers it; stream stage progress into the middle panel
+    const payload = { prompt, page_type: "auto", style, title: title || undefined };
+    const onProg = (evt) => { state.progress.push(evt); renderProgress(); };
+    const proj = api.createProjectStream
+      ? await api.createProjectStream(payload, onProg)
+      : await api.createProject(payload);
     state.project = proj; state.activePage = 0; state.activeTab = "preview";
     await loadProjects();
     toast(proj.page_type ? `Built a ${proj.page_type}.` : "Site generated.", "ok");
   });
-  state.generating = false; render();
+  state.generating = false; state.progress = []; render();
 }
 
 async function onRefine(instruction) {
