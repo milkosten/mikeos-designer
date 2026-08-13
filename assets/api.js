@@ -40,16 +40,22 @@ async function req(method, path, body) {
   return data;
 }
 
-// Streaming create: reads Server-Sent Events, calling onProgress({stage,detail}) as the
-// harness advances, and resolves with the finished project. Uses fetch (not EventSource)
-// so we can send the Bearer token.
-async function createProjectStream(payload, onProgress) {
+// Generic Server-Sent-Events POST/PUT helper. Streams `data: {json}\n\n` frames,
+// calling onEvent(evt) for EVERY event (progress|brief|page_start|token|page_done|
+// done|error) and resolving with the final project from the `done` event. Uses fetch
+// (not EventSource) so we can send the Bearer token and a JSON body.
+//
+//   method:  "POST" | "PUT"
+//   path:    e.g. "/api/projects/stream"
+//   payload: request body object
+//   onEvent: (evt) => void   — evt.type distinguishes the frame
+async function sseRequest(method, path, payload, onEvent) {
   const headers = { "Content-Type": "application/json", "Accept": "text/event-stream" };
   const t = auth.token();
   if (t) headers["Authorization"] = "Bearer " + t;
   let r;
   try {
-    r = await fetch(CFG.API_BASE + "/api/projects/stream", { method: "POST", headers, body: JSON.stringify(payload) });
+    r = await fetch(CFG.API_BASE + path, { method, headers, body: JSON.stringify(payload || {}) });
   } catch (e) { throw new Error("Network error reaching designer-api. " + (e && e.message || "")); }
   if (r.status === 401 || r.status === 403) throw new AuthError("Session expired");
   if (!r.ok || !r.body) {
@@ -70,15 +76,20 @@ async function createProjectStream(payload, onProgress) {
       for (const line of chunk.split("\n")) {
         if (!line.startsWith("data:")) continue;
         let evt; try { evt = JSON.parse(line.slice(5).trim()); } catch { continue; }
-        if (evt.type === "progress") { if (onProgress) onProgress(evt); }
-        else if (evt.type === "done") project = evt.project;
+        if (evt.type === "done") project = evt.project;
         else if (evt.type === "error") err = evt.message;
+        if (onEvent) { try { onEvent(evt); } catch { /* UI callback must not kill the stream */ } }
       }
     }
   }
   if (err) throw new Error(err);
   if (!project) throw new Error("Generation ended without a result.");
   return project;
+}
+
+// Backwards-compatible create stream. onEvent receives every SSE frame.
+function createProjectStream(payload, onEvent) {
+  return sseRequest("POST", "/api/projects/stream", payload, onEvent);
 }
 
 const live = {
@@ -89,7 +100,16 @@ const live = {
   getFiles:      (id)             => req("GET",  `/api/projects/${id}/files`),
   createProject: (payload)        => req("POST", "/api/projects", payload),
   createProjectStream,
-  refine:        (id, instruction)=> req("POST", `/api/projects/${id}/prompt`, { instruction }),
+  // Fast targeted refine — streams the revised page(s) live.
+  editStream:    (id, payload, onEvent) => sseRequest("POST", `/api/projects/${id}/edit`, payload, onEvent),
+  // Brief (the "how I understood it").
+  getBrief:      (id)             => req("GET",  `/api/projects/${id}/brief`),
+  putBriefStream:(id, brief, onEvent) => sseRequest("PUT", `/api/projects/${id}/brief`, { brief }, onEvent),
+  // Restyle — same content, new style.
+  restyleStream: (id, style, onEvent) => sseRequest("POST", `/api/projects/${id}/restyle`, { style }, onEvent),
+  // Version history.
+  versions:      (id)             => req("GET",  `/api/projects/${id}/versions`),
+  revert:        (id, versionId)  => req("POST", `/api/projects/${id}/revert`, { version_id: versionId }),
   publish:       (id)             => req("POST", `/api/projects/${id}/publish`),
   deleteProject: (id)             => req("DELETE", `/api/projects/${id}`),
 };
