@@ -38,6 +38,27 @@ function pushMessage(role, fields = {}) {
   return m;
 }
 
+// A compact copy of the thread for persistence: [{role, text}] only. Assistant messages
+// keep just the final summary text (never the transient steps/spinner). Empty-text
+// messages (e.g. an intro or a still-streaming bubble) are dropped.
+function compactMessages() {
+  return state.messages
+    .map((m) => ({ role: m.role, text: (m.text || "").trim() }))
+    .filter((m) => m.text);
+}
+
+// Debounced persist of the thread to the current project (fires shortly after a turn ends,
+// so rapid settle events don't spam the backend). No-op with no project.
+let _saveMsgTimer = null;
+function persistMessages() {
+  if (!state.project || !api.saveMessages) return;
+  const id = state.project.id;
+  clearTimeout(_saveMsgTimer);
+  _saveMsgTimer = setTimeout(() => {
+    api.saveMessages(id, compactMessages()).catch(() => { /* best-effort; never disrupt UX */ });
+  }, 600);
+}
+
 // ---------- helpers ----------
 const el = (tag, attrs = {}, ...kids) => {
   const n = document.createElement(tag);
@@ -656,6 +677,8 @@ function finalizeLiveMsg(text, kind) {
   if (text) liveMsg.text = text;
   if (kind) liveMsg.kind = kind;
   liveMsg = null;
+  // A turn has settled (done or error) — persist the thread if a project exists.
+  persistMessages();
 }
 
 async function onGenerate(prompt, style, title) {
@@ -776,8 +799,16 @@ async function openProject(id) {
     if (!state.brief && api.getBrief) {
       try { const r = await api.getBrief(id); state.brief = (r && r.brief) || null; } catch {}
     }
-    // Seed a fresh thread so the user can keep chatting to refine this project.
-    state.messages = [pushSeed(`Opened **${proj.title || "your project"}**. What should I change?`)];
+    // Restore the real prior conversation if there is one; otherwise seed a fresh thread.
+    const saved = Array.isArray(proj.messages) ? proj.messages : [];
+    if (saved.length) {
+      state.messages = saved
+        .filter((m) => m && (m.text || "").trim())
+        .map((m) => ({ role: m.role === "user" ? "user" : "assistant",
+                       text: m.text, steps: [], kind: "" }));
+    } else {
+      state.messages = [pushSeed(`Opened **${proj.title || "your project"}**. What should I change?`)];
+    }
     render();
   });
 }

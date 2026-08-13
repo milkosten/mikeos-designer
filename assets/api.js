@@ -98,6 +98,8 @@ const live = {
   listProjects:  ()               => req("GET",  "/api/projects"),
   getProject:    (id)             => req("GET",  `/api/projects/${id}`),
   getFiles:      (id)             => req("GET",  `/api/projects/${id}/files`),
+  // Persist the chat thread (compact [{role,text}]) so a reload/reopen restores it.
+  saveMessages:  (id, messages)   => req("PUT",  `/api/projects/${id}/messages`, { messages }),
   createProject: (payload)        => req("POST", "/api/projects", payload),
   createProjectStream,
   // Fast targeted refine — streams the revised page(s) live.

@@ -108,6 +108,10 @@ function seed() {
   store.set(id, {
     id, title: "Acme Studio", page_type: "landing", style: "modern", interactive: false,
     brief: defaultBrief("Acme Studio", "modern"),
+    messages: [
+      { role: "user", text: "A modern landing page for Acme Studio" },
+      { role: "assistant", text: "✓ Built **Acme Studio** — 2 pages. Tell me what to change." },
+    ],
     pages: [
       { file: "index.html", html: demoLanding("Acme Studio", "modern", false) },
       { file: "about.html", html: demoAbout("Acme Studio") },
@@ -127,6 +131,7 @@ seed();
 function shape(p) {
   return { id: p.id, title: p.title, page_type: p.page_type, style: p.style,
            interactive: p.interactive, brief: p.brief, pages: p.pages, url: p.url,
+           messages: p.messages || [],
            thumbnail: p.thumbnail, visibility: p.visibility,
            created_at: p.created_at, updated_at: p.updated_at };
 }
@@ -191,6 +196,15 @@ export const mockApi = {
   },
   async getProject(id) { await wait(100); const p = store.get(id); if (!p) throw new Error("not found"); return shape(p); },
   async getFiles(id)   { await wait(80);  const p = store.get(id); if (!p) throw new Error("not found"); return { pages: p.pages }; },
+  async saveMessages(id, messages) {
+    await wait(40); const p = store.get(id); if (!p) throw new Error("not found");
+    p.messages = (messages || [])
+      .filter((m) => m && (m.text || "").trim())
+      .slice(-100)
+      .map((m) => ({ role: m.role === "user" ? "user" : "assistant",
+                     text: String(m.text).slice(0, 4000) }));
+    return { ok: true };
+  },
 
   async createProject({ prompt, page_type, style, title, interactive }) {
     await wait(900);
@@ -205,7 +219,7 @@ export const mockApi = {
         { file: "about.html", html: demoAbout(t) },
       ],
       url: `https://designer.osmike.com/${id}/`, thumbnail: thumbFor(t, style || "modern"),
-      visibility: "private", versions: [],
+      visibility: "private", versions: [], messages: [],
       created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
     };
     pushVersion(p, "Initial generation");
