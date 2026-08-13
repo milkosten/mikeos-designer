@@ -8,12 +8,6 @@ import { mockApi } from "/assets/mock.js";
 const CFG = window.DESIGNER_CONFIG;
 const root = document.getElementById("root");
 
-// Persist the interactive choice per session.
-function loadInteractive() {
-  try { return sessionStorage.getItem("designer.interactive") === "1"; } catch { return false; }
-}
-function saveInteractive(v) { try { sessionStorage.setItem("designer.interactive", v ? "1" : "0"); } catch {} }
-
 // ---------- app state ----------
 const state = {
   meta: null,
@@ -23,7 +17,6 @@ const state = {
   activePage: 0,         // index into project.pages
   generating: false,
   progress: [],          // live [{stage,detail}] during generation
-  interactive: loadInteractive(),
   editMode: false,       // click-to-edit ("Select") toggle
   // live streaming buffers, keyed by file -> accumulated html
   live: null,            // { files:{file:html}, current:file, order:[file] } during a stream
@@ -277,15 +270,6 @@ function leftPanel() {
     styleSel.disabled = true;
   }
 
-  // Interactive toggle (persisted per session).
-  const interactiveToggle = el("label", { class: "switch", title: "Allow self-contained JavaScript so the page is a real clickable prototype" },
-    el("input", { type: "checkbox", id: "interactive",
-      onchange: (e) => { state.interactive = e.target.checked; saveInteractive(state.interactive); } }),
-    el("span", { class: "track" }, el("span", { class: "knob" })),
-    el("span", { class: "switch-label" }, "Interactive"));
-  const cb = interactiveToggle.querySelector("input");
-  cb.checked = state.interactive;
-
   const genBtn = el("button", { class: "btn primary block", disabled: state.generating || !state.meta,
     onclick: () => onGenerate(promptEl.value, styleSel.value) },
     state.generating ? el("span", { class: "spin" }) : null,
@@ -307,7 +291,6 @@ function leftPanel() {
       el("div", { class: "field" },
         el("label", {}, "Design style"),
         styleSel),
-      interactiveToggle,
       genBtn,
       state.project ? el("div", { class: "divider" }) : null,
       state.project ? el("div", { class: "section-title" }, "Change it") : null,
@@ -619,7 +602,7 @@ async function onGenerate(prompt, style, title) {
   state.brief = null; render();
   await guard(async () => {
     // page_type "auto" -> the GPU infers it; stream events into the live preview
-    const payload = { prompt, page_type: "auto", style, interactive: state.interactive, title: title || undefined };
+    const payload = { prompt, page_type: "auto", style, title: title || undefined };
     const onEvent = makeStreamHandler();
     const proj = api.createProjectStream
       ? await api.createProjectStream(payload, onEvent)
